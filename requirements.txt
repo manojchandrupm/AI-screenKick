@@ -1,0 +1,16 @@
+opencv-python>=4.8.0
+pyautogui>=0.9.54
+mss>=9.0.1
+pynput>=1.7.6
+pywin32>=306 ; sys_platform == 'win32'
+easyocr>=1.7.1
+google-genai>=0.4.0
+reportlab>=4.0.9
+python-dotenv>=1.0.1
+pillow>=10.2.0
+numpy>=1.26.4
+psutil>=5.9.0
+PyQt5>=5.15.0
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.38.0

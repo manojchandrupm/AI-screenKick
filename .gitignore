@@ -1,0 +1,21 @@
+# Virtual Environments
+ai_screen_venv/
+venv/
+env/
+
+# Output
+output/
+
+# Environment Variables
+.env
+
+.md
+# Service Accounts
+service_account.json
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
