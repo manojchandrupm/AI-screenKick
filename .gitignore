@@ -3,7 +3,7 @@ ai_screen_venv/
 venv/
 env/
 
-# Output
+# Output 
 output/
 
 # Environment Variables

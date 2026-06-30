@@ -1,5 +1,4 @@
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.omniparser.parser import parse_image
-print(parse_image)  
+from src.omniparser.service import *

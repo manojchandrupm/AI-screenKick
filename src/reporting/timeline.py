@@ -1,13 +1,8 @@
 from typing import List, Dict, Any
 
 EVENT_DESCRIPTIONS = {
-    "left_click": "Left clicked",
-    "right_click": "Right clicked",
-    "double_click": "Double clicked",
-    "scroll": "Scrolled",
     "window_change": "Changed active window",
-    "idle": "User went idle",
-    "click": "Clicked"
+    "idle": "User went idle"
 }
 
 def build_timeline(events: List[Dict[str, Any]], screenshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

@@ -226,11 +226,12 @@ class ReportExporter:
                 elif ev_type == "ai_analysis":
                     trigger = event.get("trigger_type", "auto")
                     obs = event.get("gemini_observation", "")
-                    img_path = event.get("annotated_path") or event.get("image_path", "")
+                    # Prefer the clean, original image for the PDF report so the user can see it clearly
+                    img_path = event.get("image_path") or event.get("annotated_path", "")
                     
-                    story.append(Paragraph(f"{time_str} &middot; Auto capture ({trigger})", timeline_time_style))
+                    story.append(Paragraph(f"{time_str} &middot; AI Workflow Action", timeline_time_style))
                     if obs:
-                        story.append(Paragraph(f"<b>F</b> {process_inline_markdown(obs)}", timeline_obs_style))
+                        story.append(Paragraph(f"&bull; {process_inline_markdown(obs)}", timeline_obs_style))
                     story.append(Spacer(1, 6))
                     
                     if img_path and os.path.exists(img_path):

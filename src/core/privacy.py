@@ -19,6 +19,14 @@ class PrivacyFilter:
         "you're in a waiting room"
     ]
 
+    # Keywords indicating the AI Screen Activity Analyzer itself
+    SELF_KEYWORDS = [
+        "ai screen activity analyzer",
+        "recording controls",
+        "live statistics",
+        "live event log"
+    ]
+
     @classmethod
     def is_blacklisted(cls, ocr_text: str, window_title: str = "") -> bool:
         """
@@ -42,6 +50,12 @@ class PrivacyFilter:
         for kw in cls.MEETING_KEYWORDS:
             if kw in text_lower:
                 logger.info(f"PrivacyFilter: Blacklisted via OCR (Meeting detected: '{kw}').")
+                return True
+                
+        # Check OCR for self-referential UI
+        for kw in cls.SELF_KEYWORDS:
+            if kw in text_lower:
+                logger.info(f"PrivacyFilter: Blacklisted via OCR (Self-referential UI detected: '{kw}').")
                 return True
                 
         return False

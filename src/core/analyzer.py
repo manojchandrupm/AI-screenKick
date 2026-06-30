@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from pydantic import BaseModel, Field
+from src.omniparser.service import omniparser_service
 
 class SummaryBlock(BaseModel):
     type: str = Field(description="One of: 'h1', 'h2', 'h3', 'paragraph', 'list_item'")
@@ -24,6 +25,7 @@ class BatchResult(BaseModel):
 class BatchResponseSchema(BaseModel):
     results: List[BatchResult]
     new_summary: str
+
 from google import genai
 import ollama
 # pyrefly: ignore [missing-import]
@@ -49,6 +51,9 @@ class AIAnalyzer:
         
         self.vision_model = config.OLLAMA_VISION_MODEL
         self.text_model = config.OLLAMA_TEXT_MODEL
+        
+        if not omniparser_service.initialized:
+            omniparser_service.initialize()
         
         # Initialize OCR
         self.ocr_reader = None
@@ -76,6 +81,18 @@ class AIAnalyzer:
         except Exception as e:
             logger.error(f"Failed to connect to Ollama server. Is it running? {e}")
 
+    def _get_omniparser_context(self, image_path: str) -> str:
+        """Helper to get parsed UI context from omniparser."""
+        if not config.OMNIPARSER_ENABLED:
+            return ""
+        result = omniparser_service.parse_screen(image_path)
+        if result:
+            parsed = result.get("parsed_content", [])
+            if parsed:
+                valid_items = [str(item["content"]) for item in parsed if item.get("content")]
+                return "; ".join(valid_items)
+        return ""
+
     def extract_text(self, image_path: str) -> str:
         """Extracts visible text using local OCR."""
         if self.ocr_reader is None:
@@ -95,14 +112,9 @@ class AIAnalyzer:
         app_info = app_info or {"app": "Unknown", "window_title": "Unknown"}
         
         # OmniParser Integration
-        ui_context = "No specific UI elements detected."
-        if config.OMNIPARSER_ENABLED:
-            from src.core.omniparser_detector import OmniParserDetector
-            detector = OmniParserDetector()
-            detections = detector.parse(image_path)
-            if detections:
-                items = [f"[{d['id']}] {d['label']} at {d['box']}" for d in detections]
-                ui_context = "; ".join(items)
+        ui_context = self._get_omniparser_context(image_path)
+        if not ui_context:
+            ui_context = "No specific UI elements detected."
         
         context_str = previous_context if previous_context else ""
         
@@ -245,22 +257,17 @@ class AIAnalyzer:
         return "Error: Max retries exceeded."
 
     def analyze_full(self, filepath: str, previous_context: str = "") -> Dict[str, str]:
-        """Convenience method combining OCR and Vision."""
+        """Convenience method combining OCR and OmniParser."""
         ocr_text = self.extract_text(filepath)
+        ui_context = self._get_omniparser_context(filepath)
         
-        ui_elements_text = ""
-        if config.OMNIPARSER_ENABLED:
-            from src.core.omniparser_detector import OmniParserDetector
-            detector = OmniParserDetector()
-            detections = detector.parse(filepath)
-            if detections:
-                ui_elements_text = "; ".join([f"[{d['id']}] {d['label']} at {d['box']}" for d in detections])
-                
-        ai_description = self.analyze_screenshot(filepath, ocr_text=ocr_text, previous_context=previous_context)
+        # We NO LONGER call analyze_screenshot (Gemini) here.
+        # We leave ai_description empty so that AnalysisWorker will pick it up
+        # and process all screenshots together in a single batch using analyze_session_batch.
         return {
             "ocr_text": ocr_text,
-            "ai_description": ai_description,
-            "ui_elements": ui_elements_text
+            "ai_description": "",
+            "ui_elements": ui_context
         }
 
     def analyze_session_batch(self, screenshots: List[Dict[str, Any]], ocr_map: Optional[Dict[int, str]] = None) -> List[Dict[str, Any]]:
@@ -278,9 +285,25 @@ class AIAnalyzer:
             chunk = screenshots[i:i + chunk_size]
             
             prompt = f"""
-            You are a Senior Technical Business Analyst at a Multinational Corporation (MNC). You are given a chronological chunk of screenshots representing part of a technical product demonstration or project session.
-            
-            **PREVIOUS CONTEXT / SESSION HISTORY SO FAR:**
+            You are a Senior Technical Business Analyst at a multinational company.
+
+            You are analyzing a COMPLETE USER SESSION.
+
+            The screenshots are arranged in chronological order and represent one continuous workflow.
+
+            Your primary task is NOT to describe each screenshot individually.
+
+            Instead:
+
+            1. Understand the complete workflow from the beginning to the end.
+            2. Identify the user's business objective.
+            3. Detect transitions between screens.
+            4. Explain how one action leads to the next.
+            5. Ignore repeated or nearly identical screenshots unless they represent a meaningful state change.
+            6. For the KEY screenshots that represent major steps, provide a specific description of the action.
+            7. Use OCR text and detected UI elements to understand what the user is doing.
+
+            PREVIOUS SESSION SUMMARY:
             {previous_summary}
             
             Your task is to filter screenshots and retain ONLY screenshots that represent meaningful technical product features, architectural workflows, configuration states, or demonstrations of business value.
@@ -310,7 +333,7 @@ class AIAnalyzer:
             - Screens that do not advance the workflow
             - Login pages, Authentication screens, Password entry forms
             - Empty meeting lobbies, "Waiting for Host" screens, or meeting screens where NO product is being shared
-            - CRITICAL: Self-Referential UI (The "AI Screen Activity Analyzer" app itself, recording controls, overlays)
+            - Empty meeting lobbies, "Waiting for Host" screens, or meeting screens where NO product is being shared
 
             IMPORTANT RULES:
             1. Prefer outcome over transition (e.g., Keep "Agent Configuration Page Displayed", Remove "Opening Agents Page").
@@ -322,8 +345,15 @@ class AIAnalyzer:
             If a screenshot should be REMOVED based on the rules above, its description MUST be EXACTLY "IGNORE_SCREENSHOT".
             Only provide a description for screenshots you choose to KEEP.
             
-            **Self-Referential UI Rule:**
-            CRITICAL: If a screenshot displays a screen recording application, recording controls, recording overlays, monitoring dashboards, or any screen-capture software UI (including the "AI Screen Activity Analyzer" app itself), you MUST return EXACTLY "IGNORE_SCREENSHOT". Do not describe the user interacting with the recording tool; these do not represent actual work.
+
+            **Important Workflow Rules:**
+            - Think of the screenshots as frames from a video.
+            - Do not explain every frame independently if they show the exact same activity.
+            - Merge consecutive screenshots showing the same activity (keep one, ignore the rest).
+            - Focus on meaningful user actions.
+            - Detect the beginning, middle, and end of the session.
+            - Build a coherent narrative describing the user's journey in the new_summary.
+            - For the "results" array, you MUST provide a description for the few key screenshots that represent actual progress. Do NOT ignore every screenshot.
             
             **Output JSON Structure:**
             You MUST output a valid JSON object with exactly two keys. Do not use Markdown wrappers like ```json. Just raw JSON.
@@ -333,31 +363,59 @@ class AIAnalyzer:
             Analyze the images and text below and return the JSON object.
             """
 
+            session_timeline = []
             contents = [prompt]
             
             for ss in chunk:
                 try:
-                    img = Image.open(ss["filepath"])
                     timestamp = ss.get("timestamp", "Unknown")
                     ocr_text = ocr_map.get(ss["id"], "")
                     
-                    text_context = f"Screenshot ID: {ss['id']} | Timestamp: {timestamp}"
-                    if ocr_text:
-                        text_context += f"\nExtracted Text: {ocr_text[:500]}..." # Truncate to save tokens
-                        
-                    if config.OMNIPARSER_ENABLED:
-                        from src.core.omniparser_detector import OmniParserDetector
-                        detector = OmniParserDetector()
-                        detections = detector.parse(ss["filepath"])
-                        if detections:
-                            ui_str = "; ".join([f"[{d['id']}] {d['label']} at {d['box']}" for d in detections])
-                            text_context += f"\nDetected Elements: {ui_str}"
-                            ui_map[ss["id"]] = ui_str
+                    ui_str = ss.get("ui_elements", "")
+                    if not ui_str:
+                        ui_str = self._get_omniparser_context(ss["filepath"])
                     
-                    contents.append(text_context)
+                    if ui_str:
+                        ui_map[ss["id"]] = ui_str
+                    
+                    timeline_entry = f"""
+Time: {timestamp}
+Screenshot ID: {ss['id']}
+
+OCR:
+{ocr_text[:200]}
+
+UI:
+{ui_str}
+"""
+                    session_timeline.append(timeline_entry)
+                    
+                    # Use annotated image if it was just generated by OmniParser
+                    annotated_path = config.ANNOTATED_DIR / f"annotated_{Path(ss['filepath']).name}"
+                    img_to_analyze = str(annotated_path) if annotated_path.exists() else ss["filepath"]
+                    
+                    contents.append(f"Image for Screenshot ID: {ss['id']}")
+                    img = Image.open(img_to_analyze)
                     contents.append(img)
+                    logger.info(f"Successfully prepared image ID {ss['id']} for batch analysis.")
                 except Exception as e:
-                    logger.error(f"Failed to load image for batch analysis: {ss['filepath']}")
+                    logger.error(f"Failed to load image for batch analysis: {ss['filepath']} - Error: {e}")
+                    
+            timeline_text = "\n\n".join(session_timeline)
+            
+            contents.insert(
+                1,
+                f"""
+SESSION TIMELINE
+
+The following is the chronological flow of the user's activity.
+
+{timeline_text}
+
+Analyze this timeline first before analyzing the screenshots.
+Treat the screenshots as one continuous workflow, not as independent images.
+"""
+            )
                     
             try:
                 from google.genai import types
@@ -371,6 +429,10 @@ class AIAnalyzer:
                 )
                 
                 result_json = json.loads(response.text)
+                
+                if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                    usage = response.usage_metadata
+                    logger.info(f"📊 Batch AI Analysis Token Usage - Prompt: {usage.prompt_token_count}, Response: {usage.candidates_token_count}, Total: {usage.total_token_count}")
                 
                 # Update rolling summary for the next chunk
                 previous_summary = result_json.get("new_summary", previous_summary)
@@ -410,40 +472,44 @@ class AIAnalyzer:
         prompt = f"""
         You are a Senior Technical Writer and Workflow Analyst at an MNC. You are given a raw chronological timeline of user activities, which includes screen captures (with IDs) and text-based actions from a recorded meeting or product demonstration.
         
-        Your objective is to transform this raw log into a professional Technical Session Document. A stakeholder who did not attend the meeting should be able to read your report and completely understand the technical product demonstrated, the architectures shown, and the workflows executed.
+        Your objective is to transform this raw log into a professional Technical Session Document. A stakeholder who did not attend the meeting should be able to read your report and completely understand the technical product demonstrated, the architectures shown, and the workflows executed in 15 seconds.
 
         Your task is two-fold:
         1. Evaluate the importance of each screenshot ID. Aggressively filter out repetitive screenshots, non-technical transitions, and minor UI states.
-        CRITICAL RULE: You MUST strictly exclude and NEVER retain any screenshot IDs that show the user interacting with the screen recording software itself.
         
-        2. For the screenshots you CHOOSE TO RETAIN, you must rewrite their descriptions. Do NOT write short robotic descriptions. INSTEAD, write naturally and technically: Describe the system component, the workflow being demonstrated, and the configuration state. (e.g., "The presenter demonstrated the Thunai AI Knowledge Base dashboard, highlighting the vector database configuration and document ingestion pipeline.")
+        2. For the screenshots you CHOOSE TO RETAIN, you must rewrite their descriptions to explain the REASONING behind each action.
+           CRITICAL INSTRUCTION: DO NOT describe what is visible on the screen. DO NOT focus on mouse clicks. 
+           INSTEAD, use this strict structure: [Action] was performed to [Reason]. The system [Response], indicating [Conclusion/Inference].
+           Example: "After reviewing the generated summary, the presenter attempted to verify the transcript. The system returned 'No transcripts found', indicating that transcript generation had not completed or no transcript existed for that session."
 
-        3. Generate a highly detailed Technical Session Summary.
-        The summary MUST explain: The technical product demonstrated, system architectures discussed, core workflows shown, and the final state.
-
+        3. Generate a highly detailed Technical Session Summary with Business Impact.
+        
         CRITICAL FORMATTING INSTRUCTIONS:
         You MUST output a structured JSON object containing "summary_blocks" and "retained_screenshots".
         Do NOT output a markdown string. Instead, break the report into logical blocks.
         Valid block types are: "h1", "h2", "h3", "paragraph", "list_item".
 
-        Use the following structure for your blocks:
+        Use the EXACT following structure for your blocks:
         - h1: "Technical Session Document"
-        - paragraph: [A cohesive high-level executive summary of the technical demonstration]
+        - h2: "Executive Summary"
+        - paragraph: [A cohesive, flowing STORY summarizing the session from start to finish. E.g., "The session began with validation of... The presenter reviewed... verified... evaluated... identified... and finally..."]
         - h2: "Session Objective"
         - paragraph: [Clear statement of the technical goals achieved]
-        - h2: "Technical Product Features Demonstrated"
-        - list_item: "**[Feature Name]**: [Specific configurations or UI flows demonstrated]"
-        - h2: "Architectures & Workflows Discussed"
-        - list_item: [Architecture or Workflow 1]
-        - list_item: [Architecture or Workflow 2]
-        - h2: "Interface & Dashboard States"
-        - h3: "Stage 1: [Stage Name]"
-        - paragraph: "**Summary:** [What technical state was shown]"
-        - h2: "Final Outcome"
-        - paragraph: [Conclusion of the demonstration]
-        - h2: "Session Metrics"
-        - list_item: "**Total Technical Actions**: [Count]"
-        - list_item: "**Total Workflow Stages**: [Count]"
+        - h2: "Workflow Phases"
+        - h3: "Phase 1: [Phase Name]"
+        - list_item: [Key action and the REASON it was performed]
+        - list_item: [System response or outcome]
+        - h3: "Phase 2: [Phase Name]"
+        - list_item: [Key action and the REASON it was performed]
+        - h2: "Business Outcome"
+        - paragraph: [Concluding paragraph summarizing the overall success of the workflow and its business implications.]
+        - h2: "Issue Resolution & Decisions"
+        - h3: "Issue Identified"
+        - list_item: [Specific problem encountered, or "None"]
+        - h3: "Resolution"
+        - list_item: [How it was bypassed/solved, or "Remains unresolved"]
+        - h3: "Recommendation"
+        - list_item: [Actionable next steps based on the findings]
 
         CRITICAL JSON FORMATTING RULES:
         1. You MUST output raw JSON without markdown wrappers.
@@ -477,6 +543,10 @@ class AIAnalyzer:
                 )
             )
             result_text = response.text.strip()
+            
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                usage = response.usage_metadata
+                logger.info(f"📊 Final Report Generation Token Usage - Prompt: {usage.prompt_token_count}, Response: {usage.candidates_token_count}, Total: {usage.total_token_count}")
             
             # Handle potential markdown wrappers if the model ignores the config
             if result_text.startswith("```json"):

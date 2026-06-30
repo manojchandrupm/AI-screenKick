@@ -12,6 +12,7 @@ from typing import Tuple, Optional, Callable, Dict, Any
 # pyrefly: ignore [missing-import]
 from skimage.metrics import structural_similarity as ssim
 
+
 from src.config import config
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,7 @@ class ScreenshotEngine:
         self.sct = mss.mss()
         self.monitor = self.sct.monitors[1]
 
+
     def start(self):
         self.running = True
         self.change_detector.reset()
@@ -147,6 +149,7 @@ class ScreenshotEngine:
             frame = self._grab_frame()
             if frame is not None:
                 raw_path, _ = self.manager.save_screenshot(frame, "click_")
+
                 
                 # Offset coordinates relative to the captured monitor
                 x = int(event.get("x", 0)) - self.monitor["left"]
